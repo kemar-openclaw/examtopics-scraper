@@ -22,8 +22,8 @@ class TestExamTopicsScraperIntegration:
 
         assert "gcp-pca" in exams
         assert "gcp-ace" in exams
-        assert exams["gcp-pca"]["provider"] == "Google"
-        assert "name" in exams["gcp-pca"]
+        assert exams["gcp-pca"].provider == "Google"
+        assert exams["gcp-pca"].name
 
     @pytest.mark.asyncio
     async def test_clean_html(self) -> None:

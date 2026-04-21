@@ -63,6 +63,26 @@ class Question(BaseModel):
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
+class ExamInfo(BaseModel):
+    """Lightweight exam metadata for listing/discovery."""
+
+    slug: str = Field(description="URL slug (e.g., aws-saa-c03)")
+    code: str = Field(description="Exam code (e.g., AWS-SAA-C03)")
+    name: str = Field(description="Full exam name")
+    provider: str = Field(description="Certification provider (Google, Amazon, Microsoft)")
+    provider_slug: str = Field(description="URL slug for provider (e.g., amazon)")
+    path: str = Field(description="URL path (e.g., /exams/amazon/aws-saa-c03/)")
+
+
+class VendorInfo(BaseModel):
+    """A certification vendor/provider."""
+
+    slug: str = Field(description="URL slug (e.g., amazon)")
+    name: str = Field(description="Display name (e.g., Amazon)")
+    url: str = Field(description="Full URL to vendor page")
+    exam_count: int = Field(default=0, description="Number of exams available")
+
+
 class Exam(BaseModel):
     """An exam with metadata and questions."""
 

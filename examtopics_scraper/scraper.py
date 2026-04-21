@@ -22,7 +22,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from .models import Answer, Exam, Question, QuestionType, ScrapingSession
+from .models import Answer, Exam, ExamInfo, Question, QuestionType, ScrapingSession, VendorInfo
 from .settings import ExamTopicsSettings
 
 if TYPE_CHECKING:
@@ -30,43 +30,112 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Google Cloud exam mappings
-GCP_EXAMS = {
+# Default exam mappings as fallback
+DEFAULT_EXAMS = {
     "gcp-pca": {
         "code": "GCP-PCA",
         "name": "Google Cloud Platform - Professional Cloud Architect",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-pca/",
     },
     "gcp-pcd": {
         "code": "GCP-PCD",
         "name": "Google Cloud Platform - Professional Cloud Developer",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-pcd/",
     },
     "gcp-ace": {
         "code": "GCP-ACE",
         "name": "Google Cloud Platform - Associate Cloud Engineer",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-ace/",
     },
-    "gcp-pds": {
-        "code": "GCP-PDS",
+    "gcp-pde": {
+        "code": "GCP-PDE",
         "name": "Google Cloud Platform - Professional Data Engineer",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-pde/",
     },
     "gcp-pse": {
         "code": "GCP-PSE",
         "name": "Google Cloud Platform - Professional Security Engineer",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-pse/",
     },
     "gcp-pne": {
         "code": "GCP-PNE",
         "name": "Google Cloud Platform - Professional Network Engineer",
         "provider": "Google",
+        "provider_slug": "google",
         "path": "/exams/google/gcp-pne/",
+    },
+    "aws-saa-c03": {
+        "code": "AWS-SAA-C03",
+        "name": "AWS Certified Solutions Architect - Associate",
+        "provider": "Amazon",
+        "provider_slug": "amazon",
+        "path": "/exams/amazon/aws-saa-c03/",
+    },
+    "aws-sap-c02": {
+        "code": "AWS-SAP-C02",
+        "name": "AWS Certified Solutions Architect - Professional",
+        "provider": "Amazon",
+        "provider_slug": "amazon",
+        "path": "/exams/amazon/aws-sap-c02/",
+    },
+    "aws-dva-c02": {
+        "code": "AWS-DVA-C02",
+        "name": "AWS Certified Developer - Associate",
+        "provider": "Amazon",
+        "provider_slug": "amazon",
+        "path": "/exams/amazon/aws-dva-c02/",
+    },
+    "aws-soa-c02": {
+        "code": "AWS-SOA-C02",
+        "name": "AWS Certified SysOps Administrator - Associate",
+        "provider": "Amazon",
+        "provider_slug": "amazon",
+        "path": "/exams/amazon/aws-soa-c02/",
+    },
+    "aws-cli": {
+        "code": "AWS-CLI",
+        "name": "AWS Certified Cloud Practitioner",
+        "provider": "Amazon",
+        "provider_slug": "amazon",
+        "path": "/exams/amazon/aws-cli/",
+    },
+    "azure-az-900": {
+        "code": "AZ-900",
+        "name": "Microsoft Azure Fundamentals",
+        "provider": "Microsoft",
+        "provider_slug": "microsoft",
+        "path": "/exams/microsoft/azure-az-900/",
+    },
+    "azure-az-104": {
+        "code": "AZ-104",
+        "name": "Microsoft Azure Administrator",
+        "provider": "Microsoft",
+        "provider_slug": "microsoft",
+        "path": "/exams/microsoft/azure-az-104/",
+    },
+    "azure-az-305": {
+        "code": "AZ-305",
+        "name": "Microsoft Azure Solutions Architect",
+        "provider": "Microsoft",
+        "provider_slug": "microsoft",
+        "path": "/exams/microsoft/azure-az-305/",
+    },
+    "azure-az-204": {
+        "code": "AZ-204",
+        "name": "Microsoft Azure Developer",
+        "provider": "Microsoft",
+        "provider_slug": "microsoft",
+        "path": "/exams/microsoft/azure-az-204/",
     },
 }
 
@@ -81,12 +150,15 @@ class ExamTopicsScraper:
     - Stealth mode for anti-detection
     - Disk caching to avoid re-scraping
     - Proxy support
+    - Dynamic vendor/exam discovery
     """
 
     def __init__(self, settings: ExamTopicsSettings | None = None) -> None:
         self.settings = settings or ExamTopicsSettings()
         self.ua = UserAgent() if self.settings.rotate_user_agents else None
         self.session: ScrapingSession | None = None
+        self._exams_cache: dict[str, ExamInfo] | None = None
+        self._vendors_cache: list[VendorInfo] | None = None
 
     def _get_random_user_agent(self) -> str:
         """Get a random user agent string."""
@@ -112,6 +184,7 @@ class ExamTopicsScraper:
 
     async def _save_to_cache(self, url: str, content: str) -> None:
         """Save page content to cache."""
+        self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = self._get_cache_path(url)
         async with aiofiles.open(cache_path, "w", encoding="utf-8") as f:
             await f.write(content)
@@ -159,6 +232,196 @@ class ExamTopicsScraper:
 
         return browser, context
 
+    async def discover_vendors(self, use_cache: bool = True) -> list[VendorInfo]:
+        """Discover all certification vendors from the website.
+
+        Args:
+            use_cache: Whether to use cached data.
+
+        Returns:
+            List of VendorInfo objects.
+        """
+        if self._vendors_cache:
+            return self._vendors_cache
+
+        url = f"{self.settings.base_url}/exams/"
+
+        if use_cache:
+            cached = await self._load_from_cache(url)
+            if cached:
+                vendors = self._parse_vendors_page(cached)
+                if vendors:
+                    self._vendors_cache = vendors
+                    return vendors
+
+        logger.info("Discovering vendors from %s", url)
+
+        async with async_playwright() as p:
+            browser, context = await self._create_browser_context(p)
+            page = await context.new_page()
+
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await self._random_delay()
+                await self._scroll_page(page)
+
+                content = await page.content()
+                await self._save_to_cache(url, content)
+
+                vendors = self._parse_vendors_page(content)
+                self._vendors_cache = vendors
+                return vendors
+
+            except Exception as e:
+                logger.error("Failed to discover vendors: %s", e)
+                return []
+            finally:
+                await context.close()
+                await browser.close()
+
+    def _parse_vendors_page(self, html: str) -> list[VendorInfo]:
+        """Parse vendor list from HTML."""
+        vendors = []
+
+        # Pattern 1: Vendor cards with links
+        pattern = r'<a[^>]*href="/exams/([^/]+)/"[^>]*>.*?<h[^>]*>(.*?)</h[^>]*>.*?</a>'
+        matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+
+        for slug, name in matches:
+            name = self._clean_html(name)
+            if name and slug:
+                vendors.append(VendorInfo(
+                    slug=slug.lower(),
+                    name=name.strip(),
+                    url=f"{self.settings.base_url}/exams/{slug}/",
+                ))
+
+        # Pattern 2: Alternative vendor list format
+        if not vendors:
+            pattern = r'href="/exams/([^/]+)/"[^>]*>([^<]+)<'
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            seen = set()
+            for slug, name in matches:
+                slug = slug.lower()
+                if slug not in seen and name.strip():
+                    seen.add(slug)
+                    vendors.append(VendorInfo(
+                        slug=slug,
+                        name=name.strip(),
+                        url=f"{self.settings.base_url}/exams/{slug}/",
+                    ))
+
+        return vendors
+
+    async def discover_exams(self, vendor_slug: str | None = None, use_cache: bool = True) -> list[ExamInfo]:
+        """Discover all exams, optionally filtered by vendor.
+
+        Args:
+            vendor_slug: Optional vendor slug to filter by (e.g., "amazon").
+            use_cache: Whether to use cached data.
+
+        Returns:
+            List of ExamInfo objects.
+        """
+        if vendor_slug:
+            return await self._discover_vendor_exams(vendor_slug, use_cache)
+
+        # Discover all exams from all vendors
+        vendors = await self.discover_vendors(use_cache)
+        all_exams = []
+
+        for vendor in vendors:
+            try:
+                vendor_exams = await self._discover_vendor_exams(vendor.slug, use_cache)
+                all_exams.extend(vendor_exams)
+                await self._random_delay()
+            except Exception as e:
+                logger.warning("Failed to discover exams for %s: %s", vendor.slug, e)
+
+        return all_exams
+
+    async def _discover_vendor_exams(self, vendor_slug: str, use_cache: bool = True) -> list[ExamInfo]:
+        """Discover exams for a specific vendor."""
+        url = f"{self.settings.base_url}/exams/{vendor_slug}/"
+
+        if use_cache:
+            cached = await self._load_from_cache(url)
+            if cached:
+                exams = self._parse_exams_page(cached, vendor_slug)
+                if exams:
+                    return exams
+
+        logger.info("Discovering exams for vendor: %s", vendor_slug)
+
+        async with async_playwright() as p:
+            browser, context = await self._create_browser_context(p)
+            page = await context.new_page()
+
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await self._random_delay()
+                await self._scroll_page(page)
+
+                content = await page.content()
+                await self._save_to_cache(url, content)
+
+                return self._parse_exams_page(content, vendor_slug)
+
+            except Exception as e:
+                logger.error("Failed to discover exams for %s: %s", vendor_slug, e)
+                return []
+            finally:
+                await context.close()
+                await browser.close()
+
+    def _parse_exams_page(self, html: str, vendor_slug: str) -> list[ExamInfo]:
+        """Parse exam list from vendor page HTML."""
+        exams = []
+        vendor_name = vendor_slug.title()
+
+        # Try multiple patterns for exam links
+        patterns = [
+            # Pattern 1: Exam cards with exam-code class
+            r'<a[^>]*href="/exams/[^/]+/([^/]+)/"[^>]*class="[^"]*exam[^"]*"[^>]*>.*?<h[^>]*>(.*?)</h[^>]*>.*?</a>',
+            # Pattern 2: Simple exam links
+            r'href="/exams/[^/]+/([^/]+)/"[^>]*>([^<]+)</a>',
+            # Pattern 3: Exam list items
+            r'<li[^>]*>.*?<a[^>]*href="/exams/[^/]+/([^/]+)/"[^>]*>(.*?)</a>.*?</li>',
+        ]
+
+        seen = set()
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+            for exam_slug, name in matches:
+                exam_slug = exam_slug.lower()
+                if exam_slug in seen or not name.strip():
+                    continue
+                seen.add(exam_slug)
+
+                name = self._clean_html(name).strip()
+                code = self._extract_exam_code(name, exam_slug)
+
+                exams.append(ExamInfo(
+                    slug=exam_slug,
+                    code=code,
+                    name=name,
+                    provider=vendor_name,
+                    provider_slug=vendor_slug.lower(),
+                    path=f"/exams/{vendor_slug}/{exam_slug}/",
+                ))
+
+        return exams
+
+    def _extract_exam_code(self, name: str, slug: str) -> str:
+        """Extract exam code from name or slug."""
+        # Try to extract code from name (e.g., "AWS SAA-C03: Solutions Architect")
+        code_match = re.search(r'([A-Z]{2,}-[A-Z0-9]+(?:-[A-Z0-9]+)?)', name)
+        if code_match:
+            return code_match.group(1).upper()
+
+        # Use slug as fallback, formatted
+        return slug.upper().replace("-", " ")
+
     @retry(
         retry=retry_if_exception_type((PlaywrightTimeout, Exception)),
         stop=stop_after_attempt(3),
@@ -167,32 +430,33 @@ class ExamTopicsScraper:
     )
     async def scrape_page(
         self,
-        exam_code: str,
+        exam_slug: str,
         page_num: int,
         use_cache: bool = True,
     ) -> list[Question]:
         """Scrape a single page of exam questions.
 
         Args:
-            exam_code: Exam code (e.g., "gcp-pca").
+            exam_slug: Exam slug (e.g., "gcp-pca", "aws-saa-c03").
             page_num: Page number to scrape.
-            use_cache: Whether to use cached data if available.
+            use_cache: Whether to use cached data.
 
         Returns:
             List of Question objects.
         """
-        exam_info = GCP_EXAMS.get(exam_code)
+        # Get exam info
+        exam_info = await self._get_exam_info(exam_slug)
         if not exam_info:
-            raise ValueError(f"Unknown exam code: {exam_code}")
+            raise ValueError(f"Unknown exam: {exam_slug}")
 
-        url = f"{self.settings.base_url}{exam_info['path']}{page_num}/"
+        url = f"{self.settings.base_url}{exam_info.path}{page_num}/"
 
-        # Check cache first
+        # Check cache
         if use_cache:
             cached = await self._load_from_cache(url)
             if cached:
                 logger.info("Using cached content for %s", url)
-                return self._parse_questions(cached, exam_info["code"], page_num)
+                return self._parse_questions(cached, exam_info.code, page_num)
 
         logger.info("Scraping page %d from %s", page_num, url)
 
@@ -204,19 +468,17 @@ class ExamTopicsScraper:
                 await page.goto(url, wait_until="networkidle", timeout=30000)
                 await self._random_delay()
 
-                # Wait for content to load
                 await page.wait_for_selector(
                     ".exam-question-card, .question-card, [data-testid*='question']",
                     timeout=15000,
                 )
 
-                # Scroll to load lazy content
                 await self._scroll_page(page)
 
                 content = await page.content()
                 await self._save_to_cache(url, content)
 
-                questions = self._parse_questions(content, exam_info["code"], page_num)
+                questions = self._parse_questions(content, exam_info.code, page_num)
 
                 if self.session:
                     self.session.pages_scraped += 1
@@ -234,6 +496,34 @@ class ExamTopicsScraper:
                 await context.close()
                 await browser.close()
 
+    async def _get_exam_info(self, exam_slug: str) -> ExamInfo | None:
+        """Get exam info by slug."""
+        if self._exams_cache is None:
+            self._exams_cache = {}
+            # Try to discover from default mapping first
+            for slug, info in DEFAULT_EXAMS.items():
+                self._exams_cache[slug] = ExamInfo(
+                    slug=slug,
+                    code=info["code"],
+                    name=info["name"],
+                    provider=info["provider"],
+                    provider_slug=info["provider_slug"],
+                    path=info["path"],
+                )
+
+        if exam_slug in self._exams_cache:
+            return self._exams_cache[exam_slug]
+
+        # Try to discover it
+        for vendor_slug in ["google", "amazon", "microsoft", "comptia", "cisco"]:
+            exams = await self._discover_vendor_exams(vendor_slug)
+            for exam in exams:
+                self._exams_cache[exam.slug] = exam
+                if exam.slug == exam_slug:
+                    return exam
+
+        return None
+
     async def _scroll_page(self, page: Page) -> None:
         """Scroll page to load lazy content."""
         for _ in range(3):
@@ -245,9 +535,6 @@ class ExamTopicsScraper:
     ) -> list[Question]:
         """Parse questions from HTML content."""
         questions = []
-
-        # Use regex patterns to extract questions
-        # This is a simplified version - actual implementation would be more robust
         question_blocks = self._extract_question_blocks(html)
 
         for idx, block in enumerate(question_blocks, start=1):
@@ -264,7 +551,6 @@ class ExamTopicsScraper:
 
     def _extract_question_blocks(self, html: str) -> list[str]:
         """Extract individual question blocks from HTML."""
-        # Look for common question container patterns
         patterns = [
             r'<div[^>]*class=["\'][^"\']*exam-question-card[^"\']*["\'][^>]*>.*?</div>\s*(?=<div[^>]*class=["\'][^"\']*exam-question-card|$)',
             r'<div[^>]*class=["\'][^"\']*question-card[^"\']*["\'][^>]*>.*?</div>\s*(?=<div[^>]*class=["\'][^"\']*question-card|$)',
@@ -276,18 +562,15 @@ class ExamTopicsScraper:
             if matches:
                 return matches
 
-        # Fallback: split by question number pattern
         return re.split(r'(?=<div[^>]*>\s*<h\d>\s*Question\s*\d+)', html)[1:]
 
     def _parse_single_question(
         self, html: str, exam_code: str, page_num: int, idx: int
     ) -> Question | None:
         """Parse a single question from HTML block."""
-        # Extract question number
         num_match = re.search(r'Question\s*(\d+)', html, re.IGNORECASE)
         question_number = int(num_match.group(1)) if num_match else idx
 
-        # Extract question text
         text_match = re.search(
             r'<p[^>]*class=["\'][^"\']*question-text[^"\']*["\'][^>]*>(.*?)</p>',
             html,
@@ -300,18 +583,13 @@ class ExamTopicsScraper:
             self._clean_html(text_match.group(1)) if text_match else "Unknown question"
         )
 
-        # Extract answers
         answers = self._extract_answers(html)
-
-        # Determine question type
         correct_count = sum(1 for a in answers if a.is_correct)
         question_type = (
             QuestionType.MULTIPLE_CHOICE if correct_count > 1 else QuestionType.SINGLE_CHOICE
         )
 
-        # Extract explanation
         explanation = self._extract_explanation(html)
-
         question_id = Question.generate_id(exam_code, question_number, question_text)
 
         return Question(
@@ -329,7 +607,6 @@ class ExamTopicsScraper:
         """Extract answer options from HTML."""
         answers = []
 
-        # Look for answer patterns
         answer_patterns = [
             r'<div[^>]*class=["\'][^"\']*answer[^"\']*["\'][^>]*>.*?([A-E])\.[\s]*(.*?)</div>',
             r'<li[^>]*>.*?([A-E])\.[\s]*(.*?)</li>',
@@ -351,7 +628,6 @@ class ExamTopicsScraper:
 
     def _is_correct_answer(self, html: str, letter: str) -> bool:
         """Determine if an answer is marked as correct."""
-        # Look for correct answer indicators
         correct_patterns = [
             rf'class=["\'][^"\']*correct[^"\']*["\'][^>]*>\s*{letter}',
             rf'data-correct=["\']true["\'][^>]*>\s*{letter}',
@@ -380,11 +656,8 @@ class ExamTopicsScraper:
 
     def _clean_html(self, html: str) -> str:
         """Clean HTML tags and normalize text."""
-        # Remove HTML tags
         text = re.sub(r'<[^>]+>', ' ', html)
-        # Normalize whitespace
         text = ' '.join(text.split())
-        # Decode HTML entities
         text = text.replace('&nbsp;', ' ')
         text = text.replace('&lt;', '<')
         text = text.replace('&gt;', '>')
@@ -393,37 +666,37 @@ class ExamTopicsScraper:
 
     async def scrape_exam(
         self,
-        exam_code: str,
+        exam_slug: str,
         max_pages: int | None = None,
         use_cache: bool = True,
     ) -> Exam:
         """Scrape entire exam with all pages.
 
         Args:
-            exam_code: Exam code (e.g., "gcp-pca").
-            max_pages: Maximum pages to scrape (None = unlimited).
+            exam_slug: Exam slug (e.g., "gcp-pca", "aws-saa-c03").
+            max_pages: Maximum pages to scrape.
             use_cache: Whether to use cached data.
 
         Returns:
             Exam object with all questions.
         """
-        exam_info = GCP_EXAMS.get(exam_code)
+        exam_info = await self._get_exam_info(exam_slug)
         if not exam_info:
-            raise ValueError(f"Unknown exam code: {exam_code}")
+            raise ValueError(f"Unknown exam: {exam_slug}")
 
-        self.session = ScrapingSession(exam_code=exam_info["code"])
+        self.session = ScrapingSession(exam_code=exam_info.code)
         max_pages = max_pages or self.settings.max_pages or 100
 
         exam = Exam(
-            code=exam_info["code"],
-            name=exam_info["name"],
-            provider=exam_info["provider"],
-            url=f"{self.settings.base_url}{exam_info['path']}",
+            code=exam_info.code,
+            name=exam_info.name,
+            provider=exam_info.provider,
+            url=f"{self.settings.base_url}{exam_info.path}",
         )
 
         try:
             for page_num in range(1, max_pages + 1):
-                questions = await self.scrape_page(exam_code, page_num, use_cache)
+                questions = await self.scrape_page(exam_slug, page_num, use_cache)
 
                 if not questions:
                     logger.info("No more questions on page %d, stopping", page_num)
@@ -435,7 +708,6 @@ class ExamTopicsScraper:
                     exam.questions = exam.questions[: self.settings.max_questions]
                     break
 
-                # Random delay between pages
                 await self._random_delay()
 
             exam.last_scraped = exam.questions[0].scraped_at if exam.questions else None
@@ -451,6 +723,50 @@ class ExamTopicsScraper:
 
         return exam
 
-    def get_available_exams(self) -> dict[str, dict]:
-        """Get list of available exams."""
-        return GCP_EXAMS.copy()
+    async def scrape_all_exams(
+        self,
+        vendor_slug: str | None = None,
+        max_pages_per_exam: int | None = None,
+        use_cache: bool = True,
+    ) -> list[Exam]:
+        """Scrape all available exams.
+
+        Args:
+            vendor_slug: Optional vendor to limit scraping.
+            max_pages_per_exam: Max pages per exam.
+            use_cache: Use cached data.
+
+        Returns:
+            List of Exam objects.
+        """
+        exams_info = await self.discover_exams(vendor_slug, use_cache)
+        results = []
+
+        for exam_info in exams_info:
+            try:
+                logger.info("Scraping exam: %s - %s", exam_info.code, exam_info.name)
+                exam = await self.scrape_exam(
+                    exam_info.slug,
+                    max_pages=max_pages_per_exam,
+                    use_cache=use_cache,
+                )
+                results.append(exam)
+            except Exception as e:
+                logger.error("Failed to scrape %s: %s", exam_info.slug, e)
+
+        return results
+
+    def get_available_exams(self) -> dict[str, ExamInfo]:
+        """Get list of available exams from default mapping."""
+        if self._exams_cache is None:
+            self._exams_cache = {}
+            for slug, info in DEFAULT_EXAMS.items():
+                self._exams_cache[slug] = ExamInfo(
+                    slug=slug,
+                    code=info["code"],
+                    name=info["name"],
+                    provider=info["provider"],
+                    provider_slug=info["provider_slug"],
+                    path=info["path"],
+                )
+        return self._exams_cache.copy()
