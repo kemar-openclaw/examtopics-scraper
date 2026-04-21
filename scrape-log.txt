@@ -1,0 +1,49 @@
+Discovering exams to scrape...
+Found 28 exams from google
+
+[1/28] Scraping ADWORDS FUNDAMENTALS...
+Timeout loading page https://www.examtopics.com/exams/google/adwords-fundamentals/1/
+Timeout loading page https://www.examtopics.com/exams/google/adwords-fundamentals/1/
+Timeout loading page https://www.examtopics.com/exams/google/adwords-fundamentals/1/
+  ✗ Failed: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator(".exam-question-card, .question-card, ") to be visible
+
+
+[2/28] Scraping ASSOCIATE ANDROID DEVELOPER...
+Timeout loading page https://www.examtopics.com/exams/google/associate-android-developer/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-android-developer/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-android-developer/1/
+  ✗ Failed: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator(".exam-question-card, .question-card, ") to be visible
+
+
+[3/28] Scraping ASSOCIATE CLOUD ENGINEER...
+Timeout loading page https://www.examtopics.com/exams/google/associate-cloud-engineer/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-cloud-engineer/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-cloud-engineer/1/
+  ✗ Failed: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator(".exam-question-card, .question-card, ") to be visible
+
+
+[4/28] Scraping ASSOCIATE DATA PRACTITIONER...
+Timeout loading page https://www.examtopics.com/exams/google/associate-data-practitioner/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-data-practitioner/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-data-practitioner/1/
+  ✗ Failed: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator(".exam-question-card, .question-card, ") to be visible
+
+
+[5/28] Scraping ASSOCIATE GOOGLE WORKSPACE ADMINISTRATOR...
+Timeout loading page https://www.examtopics.com/exams/google/associate-google-workspace-administrator/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-google-workspace-administrator/1/
+Timeout loading page https://www.examtopics.com/exams/google/associate-google-workspace-administrator/1/
+  ✗ Failed: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator(".exam-question-card, .question-card, ") to be visible
+
+
+[6/28] Scraping CLOUD DIGITAL LEADER...
